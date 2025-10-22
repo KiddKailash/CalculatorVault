@@ -1,12 +1,10 @@
 # Calculator App with Secure Photo Vault
 
-A React Native calculator app built with Expo that includes a hidden secure photo vault feature. The app appears as a standard calculator but provides access to a private photo storage area when the correct password sequence is entered.
-
-Download the [latest version](https://expo.dev/accounts/kailashkidd/projects/Calculator/builds/72b3b3f1-48c3-4cfa-968e-2ae678c63bb8).
+A React Native calculator app built with Expo that includes a hidden secure photo vault feature. The app appears as a standard calculator but provides access to a private photo storage area when the correct password equation is entered. Download the latest Android version, [here](https://expo.dev/accounts/kailashkidd/projects/Calculator/builds/72b3b3f1-48c3-4cfa-968e-2ae678c63bb8).
 
 ## Features
 
-- **Full-featured Calculator**: Supports basic arithmetic operations (+, -, ×, ÷), decimal numbers, percentages, and negative numbers
+- **Full-featured Calculator**: Supports arithmetic operations (+, -, ×, ÷), decimal numbers, percentages, and negative numbers
 - **Hidden Photo Vault**: Secure photo storage accessible via password
 - **Password Protection**: Set and verify custom password sequences using calculator operations
 - **Photo Management**: Import photos from camera or gallery, view in fullscreen, and delete photos
