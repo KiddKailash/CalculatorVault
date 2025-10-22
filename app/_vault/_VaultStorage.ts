@@ -1,10 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Directory, File, Paths } from 'expo-file-system';
-import { VaultPhoto } from './_types';
+import VaultPhoto from './_types';
 
 const VAULT_PHOTOS_KEY = 'vault_photos';
 
-export class VaultStorage {
+export default class VaultStorage {
   private static getVaultDirectory(): Directory {
     return new Directory(Paths.document, 'vault');
   }
