@@ -1,6 +1,7 @@
+import { Image } from 'expo-image';
 import React from 'react';
-import { Dimensions, FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { VaultPhoto } from './_types';
+import { Dimensions, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import VaultPhoto from './_types';
 
 interface PhotoGridProps {
   photos: VaultPhoto[];
@@ -24,7 +25,9 @@ export default function PhotoGrid({ photos, onPhotoPress, onPhotoLongPress }: Ph
         <Image
           source={{ uri: item.uri }}
           style={styles.photo}
-          resizeMode="cover"
+          contentFit="cover"
+          transition={150}
+          cachePolicy="memory-disk"
         />
         {isVideo && (
           <View style={styles.videoOverlay}>
