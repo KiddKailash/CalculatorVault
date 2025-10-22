@@ -1,11 +1,11 @@
-import { ResizeMode, Video } from "expo-av";
+import { Image } from "expo-image";
 import * as Sharing from "expo-sharing";
+import { useVideoPlayer, VideoView } from "expo-video";
 import React, { useRef, useState } from "react";
 import {
   Alert,
   Animated,
   Dimensions,
-  Image,
   Modal,
   PanResponder,
   ScrollView,
@@ -15,7 +15,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { VaultPhoto } from "./_types";
+import VaultPhoto from "./_types";
 
 interface PhotoViewerProps {
   photos: VaultPhoto[];
@@ -47,9 +47,20 @@ export default function PhotoViewer({
   const translateYValue = useRef(new Animated.Value(0)).current;
   const initialDistance = useRef(0);
   const initialScale = useRef(1);
+  const gestureType = useRef<"pinch" | "pan" | null>(null);
 
   const currentPhoto = photos[currentIndex];
   const isVideo = currentPhoto?.mediaType === "video";
+
+  // Create video player for the current video
+  const videoPlayer = useVideoPlayer(
+    isVideo ? currentPhoto.uri : null,
+    (player: any) => {
+      if (player) {
+        player.loop = true;
+      }
+    }
+  );
 
   // Calculate distance between two touches (for pinch zoom)
   const getDistance = (touches: any[]) => {
@@ -63,78 +74,90 @@ export default function PhotoViewer({
   // Pan responder for zoom and pan gestures
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: (evt) => {
-      return evt.nativeEvent.touches.length >= 2 || scale > 1;
+      const touchCount = evt.nativeEvent.touches.length;
+      const currentScale = (scaleValue as any).__getValue() || 1;
+      return touchCount >= 2 || currentScale > 1;
     },
     onStartShouldSetPanResponderCapture: () => false,
     onMoveShouldSetPanResponder: (evt, gestureState) => {
-      return (
-        evt.nativeEvent.touches.length >= 2 ||
-        (scale > 1 &&
-          (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5))
-      );
+      const touchCount = evt.nativeEvent.touches.length;
+      const currentScale = (scaleValue as any).__getValue() || 1;
+
+      // Always respond to two-finger gestures (pinch)
+      if (touchCount >= 2) {
+        return true;
+      }
+
+      // Respond to single-finger pan only when zoomed and there's movement
+      if (
+        currentScale > 1 &&
+        (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5)
+      ) {
+        return true;
+      }
+
+      return false;
     },
     onMoveShouldSetPanResponderCapture: () => false,
+
     onPanResponderGrant: (evt) => {
       const touches = evt.nativeEvent.touches;
+      const currentScale = (scaleValue as any).__getValue() || 1;
 
       if (touches.length >= 2) {
-        // Pinch zoom started - get current scale from animated value
+        // Pinch zoom gesture starting
+        gestureType.current = "pinch";
         initialDistance.current = getDistance(touches);
-        // Read current scale from animated value, not state (for continuous pinching)
-        const currentScale = (scaleValue as any).__getValue();
-        initialScale.current = currentScale || scale;
-        console.log('[Pinch Start] initialScale:', initialScale.current, 'currentScale:', currentScale, 'state scale:', scale);
-      } else if (scale > 1) {
-        // Pan started (only when zoomed)
+        initialScale.current = currentScale;
+      } else if (currentScale > 1) {
+        // Pan gesture starting (only when zoomed)
+        gestureType.current = "pan";
         translateXValue.setOffset(translateX);
         translateYValue.setOffset(translateY);
         translateXValue.setValue(0);
         translateYValue.setValue(0);
+      } else {
+        gestureType.current = null;
       }
     },
+
     onPanResponderMove: (evt, gestureState) => {
       const touches = evt.nativeEvent.touches;
 
-      if (touches.length >= 2) {
-        // Pinch zoom
+      // Handle based on the gesture type we determined at start
+      if (gestureType.current === "pinch" || touches.length >= 2) {
+        // Pinch zoom - always allow if we detect 2 fingers
         const currentDistance = getDistance(touches);
-        if (initialDistance.current > 0) {
-          const ratio = currentDistance / initialDistance.current;
+        if (initialDistance.current > 0 && currentDistance > 0) {
           const newScale = Math.max(
             1,
             Math.min(
               4,
-              initialScale.current * ratio
+              initialScale.current * (currentDistance / initialDistance.current)
             )
           );
 
-          console.log('[Pinch Move] initialDist:', initialDistance.current.toFixed(2), 
-                      'currentDist:', currentDistance.toFixed(2), 
-                      'ratio:', ratio.toFixed(2),
-                      'initialScale:', initialScale.current.toFixed(2), 
-                      'newScale:', newScale.toFixed(2));
-
-          // Update animated value to reflect new scale
           scaleValue.setValue(newScale);
         }
-      } else if (scale > 1) {
-        // Pan when zoomed
+      } else if (gestureType.current === "pan") {
+        // Single-finger pan when zoomed
         translateXValue.setValue(gestureState.dx);
         translateYValue.setValue(gestureState.dy);
       }
     },
+
     onPanResponderRelease: (evt, gestureState) => {
-      if (initialDistance.current > 0) {
-        // Pinch gesture ended - get final scale from animated value
+      const wasGestureType = gestureType.current;
+
+      if (wasGestureType === "pinch") {
+        // Pinch gesture ended
         let finalScale = Math.max(
           1,
-          Math.min(4, (scaleValue as any).__getValue())
+          Math.min(4, (scaleValue as any).__getValue() || 1)
         );
 
-        console.log('[Pinch Release] finalScale:', finalScale);
-
         if (finalScale <= 1.1) {
-          // If very close to 1x, snap back to 1x and reset position
+          // Snap back to 1x
           Animated.parallel([
             Animated.spring(scaleValue, {
               toValue: 1,
@@ -160,14 +183,14 @@ export default function PhotoViewer({
             setTranslateY(0);
           });
         } else {
-          // Persist the zoom level and ensure animated value is in sync
+          // Persist the zoom level
           setScale(finalScale);
-          // Force the animated value to match the final scale for next gesture
           scaleValue.setValue(finalScale);
         }
 
         initialDistance.current = 0;
-      } else if (scale > 1) {
+        initialScale.current = 1;
+      } else if (wasGestureType === "pan") {
         // Pan gesture ended
         translateXValue.flattenOffset();
         translateYValue.flattenOffset();
@@ -178,6 +201,9 @@ export default function PhotoViewer({
         setTranslateX(newTranslateX);
         setTranslateY(newTranslateY);
       }
+
+      // Reset gesture type
+      gestureType.current = null;
     },
   });
 
@@ -286,15 +312,18 @@ export default function PhotoViewer({
         {...(isCurrentPhoto && !isVideo ? panResponder.panHandlers : {})}
       >
         <View style={styles.photoContainer}>
-          {photo.mediaType === "video" ? (
-            <Video
-              source={{ uri: photo.uri }}
+          {photo.mediaType === "video" && isCurrentPhoto ? (
+            <VideoView
+              player={videoPlayer}
+              allowsPictureInPicture={true}
+              startsPictureInPictureAutomatically={true}
               style={styles.media}
-              useNativeControls
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={false}
-              isLooping={false}
+              nativeControls={true}
+              contentFit="fill"
             />
+          ) : photo.mediaType === "video" ? (
+            // Placeholder for non-current videos
+            <View style={styles.media} />
           ) : (
             <Animated.View
               style={[
@@ -311,7 +340,9 @@ export default function PhotoViewer({
               <Image
                 source={{ uri: photo.uri }}
                 style={styles.media}
-                resizeMode="contain"
+                contentFit="contain"
+                transition={200}
+                cachePolicy="memory-disk"
                 onError={(error) => {
                   console.error("Image load error:", error);
                 }}
@@ -320,8 +351,8 @@ export default function PhotoViewer({
           )}
         </View>
 
-        {/* Tap overlay for controls and zoom */}
-        {isCurrentPhoto && scale === 1 && (
+        {/* Tap overlay for controls and zoom - only for images */}
+        {isCurrentPhoto && scale === 1 && photo.mediaType !== "video" && (
           <TouchableOpacity
             style={styles.tapOverlay}
             activeOpacity={1}
@@ -567,20 +598,21 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.9)",
+    backgroundColor: "rgba(0, 0, 0, 0.85)",
     justifyContent: "flex-end",
   },
   menuContainer: {
     backgroundColor: "#1c1c1c",
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
+    paddingTop: 8,
     paddingBottom: 40,
   },
   menuItem: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: 16,
-    paddingHorizontal: 20,
+    paddingHorizontal: 24,
   },
   menuIcon: {
     fontSize: 22,
@@ -589,16 +621,17 @@ const styles = StyleSheet.create({
   menuText: {
     color: "#ff4444",
     fontSize: 16,
-    fontWeight: "500",
+    fontWeight: "600",
   },
   menuDivider: {
     height: 1,
-    backgroundColor: "#333",
-    marginHorizontal: 20,
+    backgroundColor: "#2a2a2a",
+    marginVertical: 8,
   },
   menuInfoSection: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 24,
     paddingTop: 16,
+    paddingBottom: 8,
   },
   menuInfoTitle: {
     color: "#888",
@@ -614,12 +647,13 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   menuInfoLabel: {
-    color: "#ccc",
+    color: "#aaa",
     fontSize: 15,
   },
   menuInfoValue: {
     color: "white",
     fontSize: 15,
+    fontWeight: "500",
   },
   deleteModalOverlay: {
     flex: 1,
