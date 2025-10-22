@@ -1,4 +1,4 @@
-export interface VaultPhoto {
+export default interface VaultPhoto {
   id: string;
   uri: string;
   filename: string;
