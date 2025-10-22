@@ -63,7 +63,8 @@
           "savePhotosPermission": "Allow $(PRODUCT_NAME) to save photos to your device.",
           "isAccessMediaLocationEnabled": true
         }
-      ]
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,
