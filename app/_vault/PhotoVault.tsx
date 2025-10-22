@@ -2,9 +2,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
 import React, { useEffect, useState } from "react";
 import {
-  ActionSheetIOS,
   Alert,
-  Platform,
   StatusBar,
   StyleSheet,
   Text,
@@ -12,8 +10,9 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { PhotoVaultProps, VaultPhoto, VaultViewMode } from "./_types";
-import { VaultStorage } from "./_VaultStorage";
+import VaultPhoto, { PhotoVaultProps, VaultViewMode } from "./_types";
+import VaultStorage from "./_VaultStorage";
+import ActionSheet from "./ActionSheet";
 import ConfirmDialog from "./ConfirmDialog";
 import PhotoGrid from "./PhotoGrid";
 import PhotoViewer from "./PhotoViewer";
@@ -23,6 +22,7 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
   const [viewMode, setViewMode] = useState<VaultViewMode>("grid");
   const [selectedPhoto, setSelectedPhoto] = useState<VaultPhoto | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showAddMediaSheet, setShowAddMediaSheet] = useState(false);
 
   useEffect(() => {
     loadPhotos();
@@ -60,27 +60,7 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
       return;
     }
 
-    if (Platform.OS === "ios") {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: ["Cancel", "Take Photo/Video", "Choose from Library"],
-          cancelButtonIndex: 0,
-        },
-        (buttonIndex) => {
-          if (buttonIndex === 1) {
-            takePhoto();
-          } else if (buttonIndex === 2) {
-            pickFromLibrary();
-          }
-        }
-      );
-    } else {
-      Alert.alert("Add Media", "Choose an option", [
-        { text: "Cancel", style: "cancel" },
-        { text: "Take Photo/Video", onPress: takePhoto },
-        { text: "Choose from Library", onPress: pickFromLibrary },
-      ]);
-    }
+    setShowAddMediaSheet(true);
   };
 
   const takePhoto = async () => {
@@ -167,17 +147,10 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
       return;
     }
 
-    console.log(
-      "Attempting to delete photo:",
-      targetPhoto.id,
-      targetPhoto.filename
-    );
-
     try {
       const success = await VaultStorage.removePhotoFromVault(targetPhoto.id);
 
       if (success) {
-        console.log("Photo deleted successfully:", targetPhoto.id);
         await loadPhotos();
         setViewMode("grid");
         setSelectedPhoto(null);
@@ -248,6 +221,23 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
         onConfirm={() => handleDeletePhoto(selectedPhoto || undefined)}
         onCancel={() => setShowDeleteDialog(false)}
         destructive
+      />
+
+      {/* Add Media Action Sheet */}
+      <ActionSheet
+        visible={showAddMediaSheet}
+        title="Add Media"
+        options={[
+          {
+            text: "Take Photo/Video",
+            onPress: takePhoto,
+          },
+          {
+            text: "Choose from Library",
+            onPress: pickFromLibrary,
+          },
+        ]}
+        onCancel={() => setShowAddMediaSheet(false)}
       />
     </SafeAreaView>
   );
