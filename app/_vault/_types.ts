@@ -3,15 +3,16 @@ export default interface VaultPhoto {
   uri: string;
   filename: string;
   dateAdded: number;
-  originalUri?: string; // Original URI from device before importing
   mediaType: 'image' | 'video';
   width?: number;
   height?: number;
-  duration?: number; // For videos
+  duration?: number;
+  originalAssetId?: string;
 }
 
 export interface PhotoVaultProps {
   onBack: () => void;
+  onLockRequest?: () => void;
 }
 
 export type VaultViewMode = 'grid' | 'fullscreen';
