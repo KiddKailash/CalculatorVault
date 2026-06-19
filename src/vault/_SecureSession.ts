@@ -42,10 +42,21 @@ export class VaultLockedOutError extends Error {
   }
 }
 
-export const validatePasswordStrength = (password: string): void => {
-  if (password.length < MIN_PASSWORD_TOKENS) throw new PasswordTooWeakError();
+export interface PasswordStrength {
+  lengthOk: boolean;
+  hasOperator: boolean;
+  ok: boolean;
+}
+
+export const getPasswordStrength = (password: string): PasswordStrength => {
+  const lengthOk = password.length >= MIN_PASSWORD_TOKENS;
   const hasOperator = PASSWORD_OPERATORS.some((op) => password.includes(op));
-  if (!hasOperator) throw new PasswordTooWeakError();
+  return { lengthOk, hasOperator, ok: lengthOk && hasOperator };
+};
+
+export const validatePasswordStrength = (password: string): void => {
+  const { ok } = getPasswordStrength(password);
+  if (!ok) throw new PasswordTooWeakError();
 };
 
 export default class SecureSession {
@@ -107,6 +118,12 @@ export default class SecureSession {
   async unlock(password: string): Promise<boolean> {
     const retryAfter = await this.getRetryAfterMs();
     if (retryAfter > 0) throw new VaultLockedOutError(retryAfter);
+
+    // Cheap pre-filter: an input that can't pass the strength rule can't be
+    // the password (since initialize() enforces the same rule). Skip PBKDF2
+    // and skip the failure counter so ordinary calculator math doesn't burn
+    // a lockout or cost a 200k-iteration derivation.
+    if (!getPasswordStrength(password).ok) return false;
 
     const saltB64 = await this.store.getItemAsync(KEY_SALT);
     const verifierB64 = await this.store.getItemAsync(KEY_VERIFIER);

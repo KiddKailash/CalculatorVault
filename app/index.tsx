@@ -14,12 +14,15 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import SecureSession, {
+  getPasswordStrength,
+  MIN_PASSWORD_TOKENS,
+  PASSWORD_OPERATORS,
   PasswordTooWeakError,
   VaultLockedOutError,
-} from "./_vault/_SecureSession";
-import { evaluateExpression } from "./_vault/_calculator";
-import PhotoVault from "./_vault/PhotoVault";
-import VaultStorage from "./_vault/_VaultStorage";
+} from "../src/vault/_SecureSession";
+import { evaluateExpression } from "../src/vault/_calculator";
+import PhotoVault from "../src/vault/PhotoVault";
+import VaultStorage from "../src/vault/_VaultStorage";
 
 export default function Calculator() {
   const session = useMemo(() => new SecureSession(), []);
@@ -34,9 +37,27 @@ export default function Calculator() {
   const [confirmingPassword, setConfirmingPassword] = useState(false);
   const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
   const [showPhotoVault, setShowPhotoVault] = useState(false);
+  const [passwordHint, setPasswordHint] = useState<string | null>(null);
+  const [isSavingPassword, setIsSavingPassword] = useState(false);
 
   const inSecureContext = isSettingPassword || showPhotoVault;
   const screenCaptureActive = useRef(false);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showPasswordHint = (msg: string, ms = 1500) => {
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    setPasswordHint(msg);
+    hintTimerRef.current = setTimeout(() => {
+      setPasswordHint(null);
+      hintTimerRef.current = null;
+    }, ms);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,6 +107,14 @@ export default function Calculator() {
   }, [session, storage]);
 
   const savePassword = async (password: string) => {
+    setIsSavingPassword(true);
+    if (hintTimerRef.current) {
+      clearTimeout(hintTimerRef.current);
+      hintTimerRef.current = null;
+    }
+    setPasswordHint("Encrypting vault… this can take a few seconds");
+    // Yield so React renders the hint before PBKDF2 blocks the JS thread.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     try {
       await session.initialize(password);
       setPasswordSet(true);
@@ -93,17 +122,23 @@ export default function Calculator() {
       setConfirmingPassword(false);
       setPasswordInput("");
       setConfirmPasswordInput("");
+      setPasswordHint(null);
       setDisplay("0");
       setEquation("");
     } catch (error) {
       if (error instanceof PasswordTooWeakError) {
-        flashDisplay("Use 6+ inputs incl. operator");
+        showPasswordHint(`Need ${MIN_PASSWORD_TOKENS}+ inputs with operator`);
       } else {
-        flashDisplay("Error setting password");
+        console.warn("savePassword failed:", error);
+        const detail = error instanceof Error && error.message ? error.message : String(error);
+        showPasswordHint(`Error: ${detail.slice(0, 80)}`, 4000);
+        await session.reset().catch(() => {});
       }
       setPasswordInput("");
       setConfirmPasswordInput("");
       setConfirmingPassword(false);
+    } finally {
+      setIsSavingPassword(false);
     }
   };
 
@@ -128,6 +163,7 @@ export default function Calculator() {
   };
 
   const inputDigit = (digit: string) => {
+    if (isSavingPassword) return;
     if (isSettingPassword) {
       if (confirmingPassword) {
         const v = confirmPasswordInput + digit;
@@ -153,6 +189,7 @@ export default function Calculator() {
   };
 
   const inputDecimal = () => {
+    if (isSavingPassword) return;
     if (isSettingPassword) {
       inputDigit(".");
       return;
@@ -170,6 +207,7 @@ export default function Calculator() {
   };
 
   const clear = () => {
+    if (isSavingPassword) return;
     if (isSettingPassword) {
       if (confirmingPassword) {
         setConfirmPasswordInput("");
@@ -186,21 +224,26 @@ export default function Calculator() {
   };
 
   const handleOperation = async (nextOperation: string) => {
+    if (isSavingPassword) return;
     if (nextOperation === "=") {
       if (isSettingPassword) {
         if (confirmingPassword) {
           if (passwordInput === confirmPasswordInput) {
             await savePassword(passwordInput);
           } else {
-            setDisplay("Passwords do not match");
-            setTimeout(() => {
-              setConfirmPasswordInput("");
-              setDisplay("Confirm Password");
-            }, 1500);
+            setConfirmPasswordInput("");
+            showPasswordHint("Passwords do not match");
           }
         } else {
+          const { ok, lengthOk, hasOperator } = getPasswordStrength(passwordInput);
+          if (!ok) {
+            const reasons: string[] = [];
+            if (!lengthOk) reasons.push(`${MIN_PASSWORD_TOKENS}+ inputs`);
+            if (!hasOperator) reasons.push("operator required");
+            showPasswordHint(`Too weak · ${reasons.join(" · ")}`);
+            return;
+          }
           setConfirmingPassword(true);
-          setDisplay("Confirm Password");
         }
         return;
       }
@@ -228,6 +271,7 @@ export default function Calculator() {
   };
 
   const handlePercentage = () => {
+    if (isSavingPassword) return;
     if (isSettingPassword) {
       inputDigit("%");
       return;
@@ -237,7 +281,30 @@ export default function Calculator() {
     setEquation("");
   };
 
+  const devResetVault = async () => {
+    if (!__DEV__) return;
+    try {
+      session.lock();
+      await session.reset();
+      storage.scrubDecryptedCache();
+    } catch (error) {
+      console.warn("devResetVault failed:", error);
+    }
+    setShowPhotoVault(false);
+    setPasswordInput("");
+    setConfirmPasswordInput("");
+    setConfirmingPassword(false);
+    setDisplay("0");
+    setEquation("");
+    setWaitingForOperand(false);
+    setPasswordSet(false);
+    setIsSettingPassword(true);
+    setIsSavingPassword(false);
+    showPasswordHint("Vault reset (dev)", 2000);
+  };
+
   const handlePlusMinus = () => {
+    if (isSavingPassword) return;
     if (isSettingPassword) {
       inputDigit("±");
       return;
@@ -264,18 +331,44 @@ export default function Calculator() {
     }
   };
 
+  const strengthLabel = useMemo(() => {
+    if (!isSettingPassword) return null;
+    if (confirmingPassword) {
+      if (confirmPasswordInput.length === 0) return "Re-enter to confirm";
+      return `${confirmPasswordInput.length}/${passwordInput.length} entered`;
+    }
+    if (passwordInput.length === 0) {
+      return `${MIN_PASSWORD_TOKENS}+ inputs · needs operator (${PASSWORD_OPERATORS.join("")})`;
+    }
+    const { lengthOk, hasOperator, ok } = getPasswordStrength(passwordInput);
+    if (ok) return "Strong · tap = to continue";
+    const parts: string[] = [];
+    if (!lengthOk) parts.push(`${passwordInput.length}/${MIN_PASSWORD_TOKENS} inputs`);
+    if (!hasOperator) parts.push("add operator");
+    return parts.join(" · ");
+  }, [isSettingPassword, confirmingPassword, passwordInput, confirmPasswordInput]);
+
+  const subtitle = passwordHint ?? strengthLabel;
+
   const Button = ({
     onPress,
+    onLongPress,
     text,
     style,
     textStyle,
   }: {
     onPress: () => void;
+    onLongPress?: () => void;
     text: string;
     style?: StyleProp<ViewStyle>;
     textStyle?: StyleProp<TextStyle>;
   }) => (
-    <TouchableOpacity style={[styles.button, style]} onPress={onPress}>
+    <TouchableOpacity
+      style={[styles.button, style]}
+      onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={1200}
+    >
       <Text style={[styles.buttonText, textStyle]}>{text}</Text>
     </TouchableOpacity>
   );
@@ -305,6 +398,11 @@ export default function Calculator() {
       />
 
       <View style={styles.displayContainer}>
+        {subtitle ? (
+          <Text style={styles.subtitleText} numberOfLines={1} adjustsFontSizeToFit>
+            {subtitle}
+          </Text>
+        ) : null}
         <Text style={styles.displayText} numberOfLines={1} adjustsFontSizeToFit>
           {passwordSet === null
             ? "Loading..."
@@ -318,7 +416,7 @@ export default function Calculator() {
 
       <View style={styles.buttonContainer}>
         <View style={styles.row}>
-          <Button onPress={clear} text="AC" style={styles.functionButton} textStyle={styles.functionButtonText} />
+          <Button onPress={clear} onLongPress={__DEV__ ? devResetVault : undefined} text="AC" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={handlePlusMinus} text="±" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={handlePercentage} text="%" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={() => handleOperation("÷")} text="÷" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
@@ -364,6 +462,7 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
   displayText: { color: "#ff9500", fontSize: 60, fontWeight: "200", textAlign: "right" },
+  subtitleText: { color: "#888888", fontSize: 14, fontWeight: "400", textAlign: "right", paddingBottom: 8 },
   buttonContainer: { flex: 1, justifyContent: "flex-end", marginHorizontal: "auto", gap: 10 },
   row: { flexDirection: "row", alignItems: "stretch", flex: 1, gap: 10, width: "100%" },
   button: { width: 80, height: 80, borderRadius: 40, justifyContent: "center", alignItems: "center", flex: 0 },

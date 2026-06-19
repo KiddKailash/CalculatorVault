@@ -1,4 +1,4 @@
-import { evaluateExpression, tokenizeExpression } from '../app/_vault/_calculator';
+import { evaluateExpression, tokenizeExpression } from '../src/vault/_calculator';
 
 describe('tokenizeExpression', () => {
   it('tokenizes simple number', () => {

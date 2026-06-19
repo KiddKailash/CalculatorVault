@@ -1,13 +1,13 @@
 import { Directory, File, Paths, __testFs } from './mocks/expo-file-system';
 import AsyncStorage from './mocks/async-storage';
 import * as SecureStoreMock from './mocks/expo-secure-store';
-import SecureSession from '../app/_vault/_SecureSession';
-import VaultStorage from '../app/_vault/_VaultStorage';
+import SecureSession from '../src/vault/_SecureSession';
+import VaultStorage from '../src/vault/_VaultStorage';
 import {
   base64ToBytes,
   bytesToHex,
   bytesToUtf8,
-} from '../app/_vault/_VaultCrypto';
+} from '../src/vault/_VaultCrypto';
 
 const PASSWORD = '1+2×3=4';
 

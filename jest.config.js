@@ -11,6 +11,8 @@ module.exports = {
   moduleNameMapper: {
     '^expo-secure-store$': '<rootDir>/__tests__/mocks/expo-secure-store.ts',
     '^expo-file-system$': '<rootDir>/__tests__/mocks/expo-file-system.ts',
+    '^expo-crypto$': '<rootDir>/__tests__/mocks/expo-crypto.ts',
+    '^react-native-quick-crypto$': '<rootDir>/__tests__/mocks/react-native-quick-crypto.ts',
     '^@react-native-async-storage/async-storage$':
       '<rootDir>/__tests__/mocks/async-storage.ts',
     '_PlatformSecureStore$': '<rootDir>/__tests__/mocks/PlatformSecureStore.ts',

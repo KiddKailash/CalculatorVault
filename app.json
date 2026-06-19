@@ -77,7 +77,8 @@
             "allowBackup": false
           }
         }
-      ]
+      ],
+      "react-native-quick-crypto"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -62,11 +62,11 @@ A React Native calculator app built with Expo that includes a hidden secure phot
 
 ### Key Components
 - `app/index.tsx`: Main calculator interface and logic
-- `app/_vault/PhotoVault.tsx`: Photo vault main interface
-- `app/_vault/PhotoGrid.tsx`: Photo grid display
-- `app/_vault/PhotoViewer.tsx`: Fullscreen photo viewer
-- `app/_vault/ActionSheet.tsx`: Photo action menu
-- `app/_vault/ConfirmDialog.tsx`: Deletion confirmation
+- `src/vault/PhotoVault.tsx`: Photo vault main interface
+- `src/vault/PhotoGrid.tsx`: Photo grid display
+- `src/vault/PhotoViewer.tsx`: Fullscreen photo viewer
+- `src/vault/ActionSheet.tsx`: Photo action menu
+- `src/vault/ConfirmDialog.tsx`: Deletion confirmation
 
 ### Permissions Required
 - **Camera**: Taking new photos for the vault

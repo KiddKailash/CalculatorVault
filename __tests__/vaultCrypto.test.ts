@@ -17,7 +17,7 @@ import {
   MAC_BYTES,
   randomBytes,
   utf8ToBytes,
-} from '../app/_vault/_VaultCrypto';
+} from '../src/vault/_VaultCrypto';
 
 const PASSWORD = '1+2×3';
 const SALT = new Uint8Array(16).fill(7);
