@@ -20,15 +20,19 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
+      "allowBackup": false,
       "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO"
+      ],
+      "blockedPermissions": [
         "android.permission.RECORD_AUDIO",
+        "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
-        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
         "android.permission.ACCESS_MEDIA_LOCATION",
-        "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_AUDIO"
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
       ]
     },
     "web": {
@@ -61,10 +65,19 @@
         {
           "photosPermission": "Allow $(PRODUCT_NAME) to access your photo library to import and manage photos in your secure vault.",
           "savePhotosPermission": "Allow $(PRODUCT_NAME) to save photos to your device.",
-          "isAccessMediaLocationEnabled": true
+          "isAccessMediaLocationEnabled": false
         }
       ],
-      "expo-video"
+      "expo-video",
+      "expo-secure-store",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "allowBackup": false
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
