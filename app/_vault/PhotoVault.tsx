@@ -10,17 +10,23 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import VaultPhoto, { PhotoVaultProps, VaultViewMode } from "./_types";
-import VaultStorage from "./_VaultStorage";
+import VaultPhoto, { VaultViewMode } from "./_types";
+import type VaultStorage from "./_VaultStorage";
 import ActionSheet from "./ActionSheet";
 import ConfirmDialog from "./ConfirmDialog";
 import PhotoGrid from "./PhotoGrid";
 import PhotoViewer from "./PhotoViewer";
 
-export default function PhotoVault({ onBack }: PhotoVaultProps) {
+interface Props {
+  storage: VaultStorage;
+  onBack: () => void;
+}
+
+export default function PhotoVault({ storage, onBack }: Props) {
   const [photos, setPhotos] = useState<VaultPhoto[]>([]);
   const [viewMode, setViewMode] = useState<VaultViewMode>("grid");
   const [selectedPhoto, setSelectedPhoto] = useState<VaultPhoto | null>(null);
+  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showAddMediaSheet, setShowAddMediaSheet] = useState(false);
 
@@ -29,38 +35,55 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
   }, []);
 
   const loadPhotos = async () => {
-    const vaultPhotos = await VaultStorage.getVaultPhotos();
-    setPhotos(vaultPhotos);
+    try {
+      const vaultPhotos = await storage.getVaultPhotos();
+      setPhotos(vaultPhotos);
+    } catch {
+      Alert.alert("Vault Error", "Could not read vault index. The vault may be corrupted.");
+      setPhotos([]);
+    }
   };
 
-  const requestPermissions = async (): Promise<boolean> => {
-    const { status: cameraStatus } =
-      await ImagePicker.requestCameraPermissionsAsync();
-    const { status: libraryStatus } =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-    const { status: mediaStatus } = await MediaLibrary.requestPermissionsAsync(
-      true
-    ); // Request write permissions
-
-    return (
-      cameraStatus === "granted" &&
-      libraryStatus === "granted" &&
-      mediaStatus === "granted"
-    );
+  const requestMediaPermission = async (): Promise<{ camera: boolean; library: boolean; media: boolean }> => {
+    const camera = (await ImagePicker.requestCameraPermissionsAsync()).status === "granted";
+    const library = (await ImagePicker.requestMediaLibraryPermissionsAsync()).status === "granted";
+    const media = (await MediaLibrary.requestPermissionsAsync(true)).status === "granted";
+    return { camera, library, media };
   };
 
   const showImagePickerOptions = async () => {
-    const hasPermissions = await requestPermissions();
-    if (!hasPermissions) {
-      Alert.alert(
-        "Permissions Required",
-        "Please grant camera and photo library permissions to import photos.",
-        [{ text: "OK" }]
-      );
+    const perms = await requestMediaPermission();
+    if (!perms.camera && !perms.library) {
+      Alert.alert("Permissions Required", "Camera and Photos permissions are required to add to the vault.", [{ text: "OK" }]);
       return;
     }
-
     setShowAddMediaSheet(true);
+  };
+
+  const importAsset = async (asset: ImagePicker.ImagePickerAsset, options: { deleteOriginal: boolean }) => {
+    try {
+      const vaultPhoto = await storage.addPhotoToVault(asset.uri, {
+        originalAssetId: asset.assetId ?? undefined,
+        mediaType: asset.type === "video" ? "video" : "image",
+        width: asset.width,
+        height: asset.height,
+        duration: asset.duration ?? undefined,
+      });
+      if (!vaultPhoto) {
+        Alert.alert("Error", "Failed to add to vault");
+        return;
+      }
+      if (options.deleteOriginal && asset.assetId) {
+        try {
+          await MediaLibrary.deleteAssetsAsync([asset.assetId]);
+        } catch {
+          Alert.alert("Heads up", "Vaulted, but the original could not be deleted from Photos. Please delete it manually.");
+        }
+      }
+      await loadPhotos();
+    } catch {
+      Alert.alert("Error", "Failed to import to vault");
+    }
   };
 
   const takePhoto = async () => {
@@ -69,15 +92,12 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
         mediaTypes: ["images", "videos"],
         allowsEditing: false,
         quality: 0.8,
-        videoMaxDuration: 60, // 60 seconds max
+        videoMaxDuration: 60,
       });
-
       if (!result.canceled && result.assets[0]) {
-        const mediaUri = result.assets[0].uri;
-        await importPhotoToVault(mediaUri);
+        await importAsset(result.assets[0], { deleteOriginal: false });
       }
-    } catch (error) {
-      console.error("Error taking photo/video:", error);
+    } catch {
       Alert.alert("Error", "Failed to capture media");
     }
   };
@@ -88,82 +108,56 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
         mediaTypes: ["images", "videos"],
         allowsEditing: false,
         quality: 0.8,
-        videoMaxDuration: 60, // 60 seconds max
+        videoMaxDuration: 60,
         allowsMultipleSelection: false,
       });
-
       if (!result.canceled && result.assets[0]) {
-        const mediaUri = result.assets[0].uri;
-        // Directly import without asking to delete original
-        await importPhotoToVault(mediaUri);
+        const asset = result.assets[0];
+        Alert.alert(
+          "Remove from Photos?",
+          "Delete the original from your photo library after vaulting? The vault copy is encrypted.",
+          [
+            { text: "Keep original", onPress: () => importAsset(asset, { deleteOriginal: false }) },
+            { text: "Delete original", style: "destructive", onPress: () => importAsset(asset, { deleteOriginal: true }) },
+          ],
+        );
       }
-    } catch (error) {
-      console.error("Error picking media:", error);
+    } catch {
       Alert.alert("Error", "Failed to pick media");
     }
   };
 
-  const importPhotoToVault = async (photoUri: string) => {
-    try {
-      const vaultPhoto = await VaultStorage.addPhotoToVault(photoUri);
-
-      if (vaultPhoto) {
-        await loadPhotos();
-        Alert.alert("Success", "Photo added to vault successfully");
-      } else {
-        Alert.alert("Error", "Failed to add photo to vault");
-      }
-    } catch (error) {
-      console.error("Error importing photo:", error);
-      Alert.alert("Error", "Failed to import photo");
-    }
-  };
-
-  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
-
   const handlePhotoPress = (photo: VaultPhoto) => {
-    const photoIndex = photos.findIndex((p) => p.id === photo.id);
-    setSelectedPhotoIndex(photoIndex >= 0 ? photoIndex : 0);
+    const idx = photos.findIndex((p) => p.id === photo.id);
+    setSelectedPhotoIndex(idx >= 0 ? idx : 0);
     setSelectedPhoto(photo);
     setViewMode("fullscreen");
   };
 
   const handlePhotoLongPress = (photo: VaultPhoto) => {
-    if (!photo) {
-      console.error("No photo provided to handlePhotoLongPress");
-      return;
-    }
+    if (!photo) return;
     setSelectedPhoto(photo);
     setShowDeleteDialog(true);
   };
 
   const handleDeletePhoto = async (photoToDelete?: VaultPhoto) => {
-    const targetPhoto = photoToDelete || selectedPhoto;
-
-    if (!targetPhoto) {
-      console.error("No photo to delete - targetPhoto is null/undefined");
-      Alert.alert("Error", "No photo selected for deletion");
+    const target = photoToDelete || selectedPhoto;
+    if (!target) {
       setShowDeleteDialog(false);
       return;
     }
-
     try {
-      const success = await VaultStorage.removePhotoFromVault(targetPhoto.id);
-
-      if (success) {
+      const ok = await storage.removePhotoFromVault(target.id);
+      if (ok) {
         await loadPhotos();
         setViewMode("grid");
         setSelectedPhoto(null);
-        setShowDeleteDialog(false);
-        Alert.alert("Success", "Photo removed from vault");
       } else {
-        console.error("VaultStorage.removePhotoFromVault returned false");
-        Alert.alert("Error", "Failed to remove photo");
-        setShowDeleteDialog(false);
+        Alert.alert("Error", "Failed to remove media");
       }
-    } catch (error) {
-      console.error("Error deleting photo:", error);
-      Alert.alert("Error", "Failed to delete photo");
+    } catch {
+      Alert.alert("Error", "Failed to delete media");
+    } finally {
       setShowDeleteDialog(false);
     }
   };
@@ -171,11 +165,13 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
   if (viewMode === "fullscreen" && selectedPhoto) {
     return (
       <PhotoViewer
+        storage={storage}
         photos={photos}
         initialIndex={selectedPhotoIndex}
         onClose={() => {
           setViewMode("grid");
           setSelectedPhoto(null);
+          storage.scrubDecryptedCache();
         }}
         onDelete={handleDeletePhoto}
       />
@@ -184,58 +180,38 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-      <StatusBar
-        barStyle="light-content"
-        backgroundColor="transparent"
-        translucent
-      />
-
-      {/* Header */}
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
       <View style={styles.vaultHeader}>
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
           <Text style={styles.backButtonText}>←</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          onPress={showImagePickerOptions}
-          style={styles.addButton}
-        >
+        <TouchableOpacity onPress={showImagePickerOptions} style={styles.addButton}>
           <Text style={styles.addButtonText}>+</Text>
         </TouchableOpacity>
       </View>
-
-      {/* Content */}
       <View style={styles.vaultContent}>
         <PhotoGrid
+          storage={storage}
           photos={photos}
           onPhotoPress={handlePhotoPress}
           onPhotoLongPress={handlePhotoLongPress}
         />
       </View>
-
-      {/* Delete Confirmation Dialog */}
       <ConfirmDialog
         visible={showDeleteDialog}
-        title="Delete Photo"
-        message="Are you sure you want to permanently delete this photo from your vault?"
+        title="Delete Media"
+        message="Permanently delete this from your vault?"
         confirmText="Delete"
         onConfirm={() => handleDeletePhoto(selectedPhoto || undefined)}
         onCancel={() => setShowDeleteDialog(false)}
         destructive
       />
-
-      {/* Add Media Action Sheet */}
       <ActionSheet
         visible={showAddMediaSheet}
         title="Add Media"
         options={[
-          {
-            text: "Take Photo/Video",
-            onPress: takePhoto,
-          },
-          {
-            text: "Choose from Library",
-            onPress: pickFromLibrary,
-          },
+          { text: "Take Photo/Video", onPress: takePhoto },
+          { text: "Choose from Library", onPress: pickFromLibrary },
         ]}
         onCancel={() => setShowAddMediaSheet(false)}
       />
@@ -244,43 +220,11 @@ export default function PhotoVault({ onBack }: PhotoVaultProps) {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#000000",
-    width: "100%",
-    height: "100%",
-  },
-  vaultHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 15,
-  },
-  backButton: {
-    padding: 0,
-  },
-  backButtonText: {
-    color: "white",
-    fontSize: 24,
-    fontWeight: "700",
-  },
-  vaultTitle: {
-    color: "white",
-    fontSize: 24,
-    fontWeight: "bold",
-    flex: 1,
-    textAlign: "center",
-  },
-  addButton: {
-    borderRadius: 6,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  addButtonText: {
-    color: "white",
-    fontSize: 24,
-  },
-  vaultContent: {
-    flex: 1,
-  },
+  container: { flex: 1, backgroundColor: "#000000", width: "100%", height: "100%" },
+  vaultHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 15 },
+  backButton: { padding: 0 },
+  backButtonText: { color: "white", fontSize: 24, fontWeight: "700" },
+  addButton: { borderRadius: 6, justifyContent: "center", alignItems: "center" },
+  addButtonText: { color: "white", fontSize: 24 },
+  vaultContent: { flex: 1 },
 });

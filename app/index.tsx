@@ -1,6 +1,8 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { useEffect, useState } from "react";
+import * as ScreenCapture from "expo-screen-capture";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AppState,
+  AppStateStatus,
   StatusBar,
   StyleProp,
   StyleSheet,
@@ -11,112 +13,18 @@ import {
   ViewStyle,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import SecureSession, {
+  PasswordTooWeakError,
+  VaultLockedOutError,
+} from "./_vault/_SecureSession";
+import { evaluateExpression } from "./_vault/_calculator";
 import PhotoVault from "./_vault/PhotoVault";
-
-interface Token {
-  type: "number" | "operator";
-  value: string;
-}
-
-const tokenizeExpression = (expression: string): Token[] => {
-  const tokens: Token[] = [];
-  let currentNumber = "";
-
-  for (let i = 0; i < expression.length; i++) {
-    const char = expression[i];
-
-    if ((char >= "0" && char <= "9") || char === ".") {
-      currentNumber += char;
-    } else if (["+", "-", "×", "÷"].includes(char)) {
-      // Handle negative numbers at the start or after operators
-      if (
-        char === "-" &&
-        (i === 0 || ["+", "-", "×", "÷"].includes(expression[i - 1]))
-      ) {
-        currentNumber += char;
-      } else {
-        if (currentNumber) {
-          tokens.push({ type: "number", value: currentNumber });
-          currentNumber = "";
-        }
-        tokens.push({ type: "operator", value: char });
-      }
-    }
-  }
-
-  if (currentNumber) {
-    tokens.push({ type: "number", value: currentNumber });
-  }
-
-  return tokens;
-};
-
-const evaluateExpression = (expression: string): number => {
-  if (!expression || expression === "0") return 0;
-
-  const tokens = tokenizeExpression(expression);
-  if (tokens.length === 0) return 0;
-
-  const numbers: number[] = [];
-  const operators: string[] = [];
-
-  const precedence: { [key: string]: number } = {
-    "+": 1,
-    "-": 1,
-    "×": 2,
-    "÷": 2,
-  };
-
-  const applyOperation = () => {
-    if (numbers.length < 2 || operators.length === 0) return;
-
-    const b = numbers.pop()!;
-    const a = numbers.pop()!;
-    const op = operators.pop()!;
-
-    let result: number;
-    switch (op) {
-      case "+":
-        result = a + b;
-        break;
-      case "-":
-        result = a - b;
-        break;
-      case "×":
-        result = a * b;
-        break;
-      case "÷":
-        result = a / b;
-        break;
-      default:
-        result = b;
-    }
-
-    numbers.push(result);
-  };
-
-  for (const token of tokens) {
-    if (token.type === "number") {
-      numbers.push(parseFloat(token.value));
-    } else {
-      while (
-        operators.length > 0 &&
-        precedence[operators[operators.length - 1]] >= precedence[token.value]
-      ) {
-        applyOperation();
-      }
-      operators.push(token.value);
-    }
-  }
-
-  while (operators.length > 0) {
-    applyOperation();
-  }
-
-  return numbers[0] || 0;
-};
+import VaultStorage from "./_vault/_VaultStorage";
 
 export default function Calculator() {
+  const session = useMemo(() => new SecureSession(), []);
+  const storage = useMemo(() => new VaultStorage(session), [session]);
+
   const [display, setDisplay] = useState("0");
   const [waitingForOperand, setWaitingForOperand] = useState(false);
   const [equation, setEquation] = useState("");
@@ -127,29 +35,59 @@ export default function Calculator() {
   const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
   const [showPhotoVault, setShowPhotoVault] = useState(false);
 
-  useEffect(() => {
-    checkPasswordStatus();
-  }, []);
+  const inSecureContext = isSettingPassword || showPhotoVault;
+  const screenCaptureActive = useRef(false);
 
-  const checkPasswordStatus = async () => {
-    try {
-      const storedPassword = await AsyncStorage.getItem("calculator_password");
-      if (storedPassword) {
-        setPasswordSet(true);
-      } else {
-        setPasswordSet(false);
-        setIsSettingPassword(true);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const ready = await session.isInitialized();
+      if (cancelled) return;
+      setPasswordSet(ready);
+      setIsSettingPassword(!ready);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (inSecureContext && !screenCaptureActive.current) {
+          await ScreenCapture.preventScreenCaptureAsync("vault");
+          if (mounted) screenCaptureActive.current = true;
+        } else if (!inSecureContext && screenCaptureActive.current) {
+          await ScreenCapture.allowScreenCaptureAsync("vault");
+          if (mounted) screenCaptureActive.current = false;
+        }
+      } catch {
+        // best effort
       }
-    } catch (error) {
-      console.error("Error checking password status:", error);
-      setPasswordSet(false);
-      setIsSettingPassword(true);
-    }
-  };
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [inSecureContext]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state: AppStateStatus) => {
+      if (state !== "active") {
+        session.lock();
+        storage.scrubDecryptedCache();
+        setShowPhotoVault(false);
+        setEquation("");
+        setDisplay("0");
+        setWaitingForOperand(false);
+      }
+    });
+    return () => sub.remove();
+  }, [session, storage]);
 
   const savePassword = async (password: string) => {
     try {
-      await AsyncStorage.setItem("calculator_password", password);
+      await session.initialize(password);
       setPasswordSet(true);
       setIsSettingPassword(false);
       setConfirmingPassword(false);
@@ -158,34 +96,50 @@ export default function Calculator() {
       setDisplay("0");
       setEquation("");
     } catch (error) {
-      console.error("Error saving password:", error);
+      if (error instanceof PasswordTooWeakError) {
+        flashDisplay("Use 6+ inputs incl. operator");
+      } else {
+        flashDisplay("Error setting password");
+      }
+      setPasswordInput("");
+      setConfirmPasswordInput("");
+      setConfirmingPassword(false);
     }
   };
 
-  const verifyPassword = async (inputEquation: string): Promise<boolean> => {
+  const tryUnlock = async (candidate: string): Promise<boolean> => {
     try {
-      const storedPassword = await AsyncStorage.getItem("calculator_password");
-      return storedPassword === inputEquation;
+      return await session.unlock(candidate);
     } catch (error) {
-      console.error("Error verifying password:", error);
+      if (error instanceof VaultLockedOutError) {
+        const secs = Math.ceil(error.retryAfterMs / 1000);
+        flashDisplay(`Locked ${secs}s`);
+      }
       return false;
     }
+  };
+
+  const flashDisplay = (msg: string) => {
+    setDisplay(msg);
+    setTimeout(() => {
+      setDisplay("0");
+      setEquation("");
+    }, 1500);
   };
 
   const inputDigit = (digit: string) => {
     if (isSettingPassword) {
       if (confirmingPassword) {
-        const newConfirmInput = confirmPasswordInput + digit;
-        setConfirmPasswordInput(newConfirmInput);
-        setDisplay(newConfirmInput);
+        const v = confirmPasswordInput + digit;
+        setConfirmPasswordInput(v);
+        setDisplay(v);
       } else {
-        const newPasswordInput = passwordInput + digit;
-        setPasswordInput(newPasswordInput);
-        setDisplay(newPasswordInput);
+        const v = passwordInput + digit;
+        setPasswordInput(v);
+        setDisplay(v);
       }
       return;
     }
-
     if (waitingForOperand) {
       setDisplay(digit);
       setWaitingForOperand(false);
@@ -193,11 +147,8 @@ export default function Calculator() {
     } else {
       const newDisplay = display === "0" ? digit : display + digit;
       setDisplay(newDisplay);
-      if (equation) {
-        setEquation(equation + digit);
-      } else {
-        setEquation(newDisplay);
-      }
+      if (equation) setEquation(equation + digit);
+      else setEquation(newDisplay);
     }
   };
 
@@ -206,7 +157,6 @@ export default function Calculator() {
       inputDigit(".");
       return;
     }
-
     if (waitingForOperand) {
       setDisplay("0.");
       setWaitingForOperand(false);
@@ -214,11 +164,8 @@ export default function Calculator() {
     } else if (display.indexOf(".") === -1) {
       const newDisplay = display + ".";
       setDisplay(newDisplay);
-      if (equation) {
-        setEquation(equation + ".");
-      } else {
-        setEquation(newDisplay);
-      }
+      if (equation) setEquation(equation + ".");
+      else setEquation(newDisplay);
     }
   };
 
@@ -233,7 +180,6 @@ export default function Calculator() {
       }
       return;
     }
-
     setDisplay("0");
     setWaitingForOperand(false);
     setEquation("");
@@ -243,18 +189,16 @@ export default function Calculator() {
     if (nextOperation === "=") {
       if (isSettingPassword) {
         if (confirmingPassword) {
-          // Confirm password
           if (passwordInput === confirmPasswordInput) {
-            savePassword(passwordInput);
+            await savePassword(passwordInput);
           } else {
             setDisplay("Passwords do not match");
             setTimeout(() => {
               setConfirmPasswordInput("");
               setDisplay("Confirm Password");
-            }, 2000);
+            }, 1500);
           }
         } else {
-          // Move to confirmation step
           setConfirmingPassword(true);
           setDisplay("Confirm Password");
         }
@@ -262,16 +206,11 @@ export default function Calculator() {
       }
 
       if (equation) {
-        // Check if the equation matches the stored password
-        const isPasswordCorrect = await verifyPassword(equation);
-
-        if (isPasswordCorrect) {
-          // Navigate to photo vault
+        const unlocked = await tryUnlock(equation);
+        if (unlocked) {
           setShowPhotoVault(true);
           return;
         }
-
-        // Normal calculation
         const result = evaluateExpression(equation);
         setDisplay(String(result));
         setEquation("");
@@ -282,12 +221,8 @@ export default function Calculator() {
         inputDigit(nextOperation);
         return;
       }
-
-      if (equation) {
-        setEquation(equation + nextOperation);
-      } else {
-        setEquation(display + nextOperation);
-      }
+      if (equation) setEquation(equation + nextOperation);
+      else setEquation(display + nextOperation);
       setWaitingForOperand(true);
     }
   };
@@ -297,7 +232,6 @@ export default function Calculator() {
       inputDigit("%");
       return;
     }
-
     const value = parseFloat(display);
     setDisplay(String(value / 100));
     setEquation("");
@@ -312,22 +246,15 @@ export default function Calculator() {
       const newDisplay =
         display.charAt(0) === "-" ? display.substring(1) : "-" + display;
       setDisplay(newDisplay);
-
-      // Update equation if it exists
       if (equation) {
-        // Find the last number in the equation and update it
         const lastOperatorIndex = Math.max(
           equation.lastIndexOf("+"),
           equation.lastIndexOf("-"),
           equation.lastIndexOf("×"),
           equation.lastIndexOf("÷")
         );
-
-        if (lastOperatorIndex === -1) {
-          // No operators, whole equation is a number
-          setEquation(newDisplay);
-        } else {
-          // Replace the last number with the new display
+        if (lastOperatorIndex === -1) setEquation(newDisplay);
+        else {
           const beforeLastNumber = equation.substring(0, lastOperatorIndex + 1);
           setEquation(beforeLastNumber + newDisplay);
         }
@@ -353,11 +280,13 @@ export default function Calculator() {
     </TouchableOpacity>
   );
 
-  // Show photo vault if password was correctly entered
   if (showPhotoVault) {
     return (
       <PhotoVault
+        storage={storage}
         onBack={() => {
+          session.lock();
+          storage.scrubDecryptedCache();
           setShowPhotoVault(false);
           setDisplay("0");
           setEquation("");
@@ -389,117 +318,33 @@ export default function Calculator() {
 
       <View style={styles.buttonContainer}>
         <View style={styles.row}>
-          <Button
-            onPress={clear}
-            text="AC"
-            style={styles.functionButton}
-            textStyle={styles.functionButtonText}
-          />
-          <Button
-            onPress={handlePlusMinus}
-            text="±"
-            style={styles.functionButton}
-            textStyle={styles.functionButtonText}
-          />
-          <Button
-            onPress={handlePercentage}
-            text="%"
-            style={styles.functionButton}
-            textStyle={styles.functionButtonText}
-          />
-          <Button
-            onPress={() => handleOperation("÷")}
-            text="÷"
-            style={styles.operatorButton}
-            textStyle={styles.operatorButtonText}
-          />
+          <Button onPress={clear} text="AC" style={styles.functionButton} textStyle={styles.functionButtonText} />
+          <Button onPress={handlePlusMinus} text="±" style={styles.functionButton} textStyle={styles.functionButtonText} />
+          <Button onPress={handlePercentage} text="%" style={styles.functionButton} textStyle={styles.functionButtonText} />
+          <Button onPress={() => handleOperation("÷")} text="÷" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
-
         <View style={styles.row}>
-          <Button
-            onPress={() => inputDigit("7")}
-            text="7"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("8")}
-            text="8"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("9")}
-            text="9"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => handleOperation("×")}
-            text="×"
-            style={styles.operatorButton}
-            textStyle={styles.operatorButtonText}
-          />
+          <Button onPress={() => inputDigit("7")} text="7" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("8")} text="8" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("9")} text="9" style={styles.numberButton} />
+          <Button onPress={() => handleOperation("×")} text="×" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
-
         <View style={styles.row}>
-          <Button
-            onPress={() => inputDigit("4")}
-            text="4"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("5")}
-            text="5"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("6")}
-            text="6"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => handleOperation("-")}
-            text="-"
-            style={styles.operatorButton}
-            textStyle={styles.operatorButtonText}
-          />
+          <Button onPress={() => inputDigit("4")} text="4" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("5")} text="5" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("6")} text="6" style={styles.numberButton} />
+          <Button onPress={() => handleOperation("-")} text="-" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
-
         <View style={styles.row}>
-          <Button
-            onPress={() => inputDigit("1")}
-            text="1"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("2")}
-            text="2"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => inputDigit("3")}
-            text="3"
-            style={styles.numberButton}
-          />
-          <Button
-            onPress={() => handleOperation("+")}
-            text="+"
-            style={styles.operatorButton}
-            textStyle={styles.operatorButtonText}
-          />
+          <Button onPress={() => inputDigit("1")} text="1" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("2")} text="2" style={styles.numberButton} />
+          <Button onPress={() => inputDigit("3")} text="3" style={styles.numberButton} />
+          <Button onPress={() => handleOperation("+")} text="+" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
-
         <View style={styles.row}>
-          <Button
-            onPress={() => inputDigit("0")}
-            text="0"
-            style={[styles.numberButton, styles.zeroButton]}
-          />
+          <Button onPress={() => inputDigit("0")} text="0" style={[styles.numberButton, styles.zeroButton]} />
           <Button onPress={inputDecimal} text="." style={styles.numberButton} />
-          <Button
-            onPress={() => handleOperation("=")}
-            text="="
-            style={styles.operatorButton}
-            textStyle={styles.operatorButtonText}
-          />
+          <Button onPress={() => handleOperation("=")} text="=" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
       </View>
     </SafeAreaView>
@@ -507,70 +352,26 @@ export default function Calculator() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#000000",
-    height: '100%',
-    width: '100%',
-  },
+  container: { flex: 1, backgroundColor: "#000000", height: "100%", width: "100%" },
   displayContainer: {
     flex: 0.6,
-    height: '100%',
-    width: '100%',
+    height: "100%",
+    width: "100%",
     justifyContent: "flex-end",
     alignItems: "flex-end",
     paddingHorizontal: 20,
     paddingBottom: 20,
     paddingTop: 0,
   },
-  displayText: {
-    color: "#ff9500",
-    fontSize: 60,
-    fontWeight: "200",
-    textAlign: "right",
-  },
-  buttonContainer: {
-    flex: 1,
-    justifyContent: "flex-end",
-    marginHorizontal: "auto",
-    gap: 10, // for platforms that support it
-  },
-  row: {
-    flexDirection: "row",
-    alignItems: "stretch",
-    flex: 1,
-    gap: 10, // dynamic gap, only works on RN >= 0.71
-    width: "100%",
-  },
-  button: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    justifyContent: "center",
-    alignItems: "center",
-    flex: 0,
-  },
-  zeroButton: {
-    borderRadius: 40,
-    width: 170,
-  },
-  buttonText: {
-    fontSize: 30,
-    fontWeight: "400",
-  },
-  numberButton: {
-    backgroundColor: "#333333",
-  },
-  functionButton: {
-    backgroundColor: "#a6a6a6",
-  },
-  functionButtonText: {
-    color: "#000000",
-  },
-  operatorButton: {
-    backgroundColor: "#ff9500",
-  },
-  operatorButtonText: {
-    color: "white",
-  },
+  displayText: { color: "#ff9500", fontSize: 60, fontWeight: "200", textAlign: "right" },
+  buttonContainer: { flex: 1, justifyContent: "flex-end", marginHorizontal: "auto", gap: 10 },
+  row: { flexDirection: "row", alignItems: "stretch", flex: 1, gap: 10, width: "100%" },
+  button: { width: 80, height: 80, borderRadius: 40, justifyContent: "center", alignItems: "center", flex: 0 },
+  zeroButton: { borderRadius: 40, width: 170 },
+  buttonText: { fontSize: 30, fontWeight: "400" },
+  numberButton: { backgroundColor: "#333333" },
+  functionButton: { backgroundColor: "#a6a6a6" },
+  functionButtonText: { color: "#000000" },
+  operatorButton: { backgroundColor: "#ff9500" },
+  operatorButtonText: { color: "white" },
 });

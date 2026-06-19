@@ -1,34 +1,59 @@
 import { Image } from 'expo-image';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Dimensions, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import VaultPhoto from './_types';
+import type VaultStorage from './_VaultStorage';
 
 interface PhotoGridProps {
+  storage: VaultStorage;
   photos: VaultPhoto[];
   onPhotoPress: (photo: VaultPhoto) => void;
   onPhotoLongPress: (photo: VaultPhoto) => void;
 }
 
 const { width } = Dimensions.get('window');
-const PHOTO_SIZE = (width - 60) / 3; // 3 photos per row with padding
+const PHOTO_SIZE = (width - 60) / 3;
 
-export default function PhotoGrid({ photos, onPhotoPress, onPhotoLongPress }: PhotoGridProps) {
+const Thumbnail = ({ storage, photo }: { storage: VaultStorage; photo: VaultPhoto }) => {
+  const [uri, setUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const decryptedUri = await storage.decryptToCache(photo);
+        if (!cancelled) setUri(decryptedUri);
+      } catch {
+        if (!cancelled) setUri(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [storage, photo]);
+
+  if (!uri) return <View style={[styles.photo, styles.placeholder]} />;
+  return (
+    <Image
+      source={{ uri }}
+      style={styles.photo}
+      contentFit="cover"
+      transition={150}
+      cachePolicy="none"
+    />
+  );
+};
+
+export default function PhotoGrid({ storage, photos, onPhotoPress, onPhotoLongPress }: PhotoGridProps) {
   const renderPhoto = ({ item }: { item: VaultPhoto }) => {
     const isVideo = item.mediaType === 'video';
-
     return (
       <TouchableOpacity
         style={styles.photoContainer}
         onPress={() => onPhotoPress(item)}
         onLongPress={() => onPhotoLongPress(item)}
       >
-        <Image
-          source={{ uri: item.uri }}
-          style={styles.photo}
-          contentFit="cover"
-          transition={150}
-          cachePolicy="memory-disk"
-        />
+        <Thumbnail storage={storage} photo={item} />
         {isVideo && (
           <View style={styles.videoOverlay}>
             <Text style={styles.videoIcon}>▶</Text>
@@ -65,60 +90,14 @@ export default function PhotoGrid({ photos, onPhotoPress, onPhotoLongPress }: Ph
 }
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 15,
-  },
-  photoContainer: {
-    margin: 5,
-    borderRadius: 8,
-    overflow: 'hidden',
-  },
-  photo: {
-    width: PHOTO_SIZE,
-    height: PHOTO_SIZE,
-    backgroundColor: '#333',
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 40,
-  },
-  emptyText: {
-    color: '#666',
-    fontSize: 24,
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  emptySubText: {
-    color: '#888',
-    fontSize: 16,
-    textAlign: 'center',
-  },
-  videoOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
-  },
-  videoIcon: {
-    color: 'white',
-    fontSize: 24,
-    textAlign: 'center',
-  },
-  videoDuration: {
-    position: 'absolute',
-    bottom: 4,
-    right: 4,
-    color: 'white',
-    fontSize: 10,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    borderRadius: 2,
-  },
+  container: { padding: 15 },
+  photoContainer: { margin: 5, borderRadius: 8, overflow: 'hidden' },
+  photo: { width: PHOTO_SIZE, height: PHOTO_SIZE, backgroundColor: '#333' },
+  placeholder: { backgroundColor: '#222' },
+  emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 },
+  emptyText: { color: '#666', fontSize: 24, marginBottom: 10, textAlign: 'center' },
+  emptySubText: { color: '#888', fontSize: 16, textAlign: 'center' },
+  videoOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.3)' },
+  videoIcon: { color: 'white', fontSize: 24, textAlign: 'center' },
+  videoDuration: { position: 'absolute', bottom: 4, right: 4, color: 'white', fontSize: 10, backgroundColor: 'rgba(0,0,0,0.7)', paddingHorizontal: 4, paddingVertical: 2, borderRadius: 2 },
 });
