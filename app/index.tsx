@@ -21,6 +21,7 @@ import SecureSession, {
   VaultLockedOutError,
 } from "../src/vault/_SecureSession";
 import { evaluateExpression } from "../src/vault/_calculator";
+import ConfirmDialog from "../src/vault/ConfirmDialog";
 import PhotoVault from "../src/vault/PhotoVault";
 import VaultStorage from "../src/vault/_VaultStorage";
 
@@ -39,10 +40,15 @@ export default function Calculator() {
   const [showPhotoVault, setShowPhotoVault] = useState(false);
   const [passwordHint, setPasswordHint] = useState<string | null>(null);
   const [isSavingPassword, setIsSavingPassword] = useState(false);
+  const [isUnlocking, setIsUnlocking] = useState(false);
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [showResetDialog, setShowResetDialog] = useState(false);
 
   const inSecureContext = isSettingPassword || showPhotoVault;
   const screenCaptureActive = useRef(false);
   const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressLockRef = useRef(false);
 
   const showPasswordHint = (msg: string, ms = 1500) => {
     if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
@@ -66,11 +72,40 @@ export default function Calculator() {
       if (cancelled) return;
       setPasswordSet(ready);
       setIsSettingPassword(!ready);
+      // Seed the lockout countdown from disk if a prior session left a backoff
+      // active (process killed mid-lockout, app reopened later).
+      if (ready) {
+        const retry = await session.getRetryAfterMs();
+        if (!cancelled && retry > 0) setLockedUntil(Date.now() + retry);
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [session]);
+
+  // Tick the countdown once per second while a lockout is active. The
+  // interval is only registered when needed so it doesn't waste cycles.
+  useEffect(() => {
+    if (lockedUntil === null) return;
+    setNow(Date.now());
+    const id = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= lockedUntil) {
+        setLockedUntil(null);
+        clearInterval(id);
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, [lockedUntil]);
+
+  const isLockedOut = lockedUntil !== null && now < lockedUntil;
+  const lockoutSecondsRemaining = isLockedOut
+    ? Math.max(0, Math.ceil(((lockedUntil ?? 0) - now) / 1000))
+    : 0;
+  const isLoading = passwordSet === null;
+  const isInputBlocked = isSavingPassword || isUnlocking || isLoading || isLockedOut;
 
   useEffect(() => {
     let mounted = true;
@@ -94,14 +129,22 @@ export default function Calculator() {
 
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state: AppStateStatus) => {
-      if (state !== "active") {
-        session.lock();
-        storage.scrubDecryptedCache();
-        setShowPhotoVault(false);
-        setEquation("");
-        setDisplay("0");
-        setWaitingForOperand(false);
-      }
+      // "inactive" fires for transient overlays (iOS permission dialogs, Control
+      // Center, incoming calls) — locking on those breaks in-app system flows
+      // like the media picker. Only lock when the app actually leaves view.
+      if (state !== "background") return;
+      if (suppressLockRef.current) return;
+      session.lock();
+      storage.scrubDecryptedCache();
+      setShowPhotoVault(false);
+      setEquation("");
+      setDisplay("0");
+      setWaitingForOperand(false);
+      // Wipe any half-typed password so it doesn't reappear when the user
+      // returns to the foreground.
+      setPasswordInput("");
+      setConfirmPasswordInput("");
+      setConfirmingPassword(false);
     });
     return () => sub.remove();
   }, [session, storage]);
@@ -125,6 +168,9 @@ export default function Calculator() {
       setPasswordHint(null);
       setDisplay("0");
       setEquation("");
+      // First-run UX: drop the user straight into the vault rather than
+      // making them re-enter the password they just chose.
+      setShowPhotoVault(true);
     } catch (error) {
       if (error instanceof PasswordTooWeakError) {
         showPasswordHint(`Need ${MIN_PASSWORD_TOKENS}+ inputs with operator`);
@@ -142,28 +188,49 @@ export default function Calculator() {
     }
   };
 
-  const tryUnlock = async (candidate: string): Promise<boolean> => {
+  type UnlockResult = "unlocked" | "wrong" | "locked" | "error";
+
+  const tryUnlock = async (candidate: string): Promise<UnlockResult> => {
     try {
-      return await session.unlock(candidate);
+      const ok = await session.unlock(candidate);
+      return ok ? "unlocked" : "wrong";
     } catch (error) {
       if (error instanceof VaultLockedOutError) {
-        const secs = Math.ceil(error.retryAfterMs / 1000);
-        flashDisplay(`Locked ${secs}s`);
+        setLockedUntil(Date.now() + error.retryAfterMs);
+        return "locked";
       }
-      return false;
+      console.warn("unlock failed:", error);
+      return "error";
     }
   };
 
-  const flashDisplay = (msg: string) => {
-    setDisplay(msg);
-    setTimeout(() => {
-      setDisplay("0");
-      setEquation("");
-    }, 1500);
+  const resetVault = async () => {
+    setShowResetDialog(false);
+    setIsSavingPassword(true);
+    try {
+      session.lock();
+      await storage.clearVault().catch(() => {});
+      await session.reset();
+    } catch (error) {
+      console.warn("resetVault failed:", error);
+    }
+    setShowPhotoVault(false);
+    setPasswordInput("");
+    setConfirmPasswordInput("");
+    setConfirmingPassword(false);
+    setDisplay("0");
+    setEquation("");
+    setWaitingForOperand(false);
+    setLockedUntil(null);
+    setPasswordSet(false);
+    setIsSettingPassword(true);
+    setIsSavingPassword(false);
+    setIsUnlocking(false);
+    showPasswordHint("Vault reset · set a new password", 3000);
   };
 
   const inputDigit = (digit: string) => {
-    if (isSavingPassword) return;
+    if (isInputBlocked) return;
     if (isSettingPassword) {
       if (confirmingPassword) {
         const v = confirmPasswordInput + digit;
@@ -189,7 +256,7 @@ export default function Calculator() {
   };
 
   const inputDecimal = () => {
-    if (isSavingPassword) return;
+    if (isInputBlocked) return;
     if (isSettingPassword) {
       inputDigit(".");
       return;
@@ -207,7 +274,9 @@ export default function Calculator() {
   };
 
   const clear = () => {
-    if (isSavingPassword) return;
+    // Allow AC during lockout so the user can wipe the display, but still
+    // block it while saving a password or unlocking (state would race).
+    if (isSavingPassword || isUnlocking || isLoading) return;
     if (isSettingPassword) {
       if (confirmingPassword) {
         setConfirmPasswordInput("");
@@ -224,7 +293,7 @@ export default function Calculator() {
   };
 
   const handleOperation = async (nextOperation: string) => {
-    if (isSavingPassword) return;
+    if (isInputBlocked) return;
     if (nextOperation === "=") {
       if (isSettingPassword) {
         if (confirmingPassword) {
@@ -248,16 +317,36 @@ export default function Calculator() {
         return;
       }
 
-      if (equation) {
-        const unlocked = await tryUnlock(equation);
-        if (unlocked) {
+      if (!equation) return;
+      // Latch isUnlocking around the PBKDF2 call so a second tap on = can't
+      // queue a duplicate attempt and double-charge the failure counter.
+      setIsUnlocking(true);
+      try {
+        const result = await tryUnlock(equation);
+        if (result === "unlocked") {
           setShowPhotoVault(true);
           return;
         }
-        const result = evaluateExpression(equation);
-        setDisplay(String(result));
+        if (result === "locked") {
+          // The lockout banner takes over; clear the equation so the next
+          // attempt starts fresh once it expires.
+          setEquation("");
+          setDisplay("0");
+          setWaitingForOperand(false);
+          return;
+        }
+        if (result === "error") {
+          showPasswordHint("Vault error · try again", 3000);
+          return;
+        }
+        // "wrong" — fall through to compute the harmless calculator answer
+        // so onlookers see a normal calc behaviour.
+        const value = evaluateExpression(equation);
+        setDisplay(String(value));
         setEquation("");
         setWaitingForOperand(true);
+      } finally {
+        setIsUnlocking(false);
       }
     } else {
       if (isSettingPassword) {
@@ -271,9 +360,9 @@ export default function Calculator() {
   };
 
   const handlePercentage = () => {
-    if (isSavingPassword) return;
+    if (isInputBlocked) return;
     if (isSettingPassword) {
-      inputDigit("%");
+      // % is not a valid password char (see PASSWORD_OPERATORS); ignore.
       return;
     }
     const value = parseFloat(display);
@@ -281,32 +370,11 @@ export default function Calculator() {
     setEquation("");
   };
 
-  const devResetVault = async () => {
-    if (!__DEV__) return;
-    try {
-      session.lock();
-      await session.reset();
-      storage.scrubDecryptedCache();
-    } catch (error) {
-      console.warn("devResetVault failed:", error);
-    }
-    setShowPhotoVault(false);
-    setPasswordInput("");
-    setConfirmPasswordInput("");
-    setConfirmingPassword(false);
-    setDisplay("0");
-    setEquation("");
-    setWaitingForOperand(false);
-    setPasswordSet(false);
-    setIsSettingPassword(true);
-    setIsSavingPassword(false);
-    showPasswordHint("Vault reset (dev)", 2000);
-  };
-
   const handlePlusMinus = () => {
-    if (isSavingPassword) return;
+    if (isInputBlocked) return;
     if (isSettingPassword) {
-      inputDigit("±");
+      // ± is not a valid password char (see PASSWORD_OPERATORS); ignore so it
+      // doesn't pollute the password string with chars unlock mode can't enter.
       return;
     }
     if (display !== "0") {
@@ -348,7 +416,14 @@ export default function Calculator() {
     return parts.join(" · ");
   }, [isSettingPassword, confirmingPassword, passwordInput, confirmPasswordInput]);
 
-  const subtitle = passwordHint ?? strengthLabel;
+  const lockoutLabel = isLockedOut
+    ? `Vault locked · ${lockoutSecondsRemaining}s`
+    : null;
+  const unlockingLabel = null;
+  // Priority: explicit lockout > async unlock progress > one-shot hint > setup
+  // strength label. This keeps the lockout visible until it expires instead of
+  // being clobbered by stale hints.
+  const subtitle = lockoutLabel ?? unlockingLabel ?? passwordHint ?? strengthLabel;
 
   const Button = ({
     onPress,
@@ -377,6 +452,7 @@ export default function Calculator() {
     return (
       <PhotoVault
         storage={storage}
+        suppressLockRef={suppressLockRef}
         onBack={() => {
           session.lock();
           storage.scrubDecryptedCache();
@@ -416,7 +492,7 @@ export default function Calculator() {
 
       <View style={styles.buttonContainer}>
         <View style={styles.row}>
-          <Button onPress={clear} onLongPress={__DEV__ ? devResetVault : undefined} text="AC" style={styles.functionButton} textStyle={styles.functionButtonText} />
+          <Button onPress={clear} onLongPress={() => setShowResetDialog(true)} text="AC" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={handlePlusMinus} text="±" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={handlePercentage} text="%" style={styles.functionButton} textStyle={styles.functionButtonText} />
           <Button onPress={() => handleOperation("÷")} text="÷" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
@@ -445,6 +521,15 @@ export default function Calculator() {
           <Button onPress={() => handleOperation("=")} text="=" style={styles.operatorButton} textStyle={styles.operatorButtonText} />
         </View>
       </View>
+      <ConfirmDialog
+        visible={showResetDialog}
+        title="Reset Vault?"
+        message="This permanently deletes all encrypted media and forgets your password. There is no undo."
+        confirmText="Reset Vault"
+        onConfirm={resetVault}
+        onCancel={() => setShowResetDialog(false)}
+        destructive
+      />
     </SafeAreaView>
   );
 }

@@ -31,8 +31,15 @@ describe('getPasswordStrength', () => {
     expect(getPasswordStrength('1+2×3=4')).toEqual({ lengthOk: true, hasOperator: true, ok: true });
   });
 
-  it('accepts ± as a qualifying operator', () => {
-    expect(getPasswordStrength('12345±')).toMatchObject({ hasOperator: true, ok: true });
+  // ± and % are intentionally excluded from PASSWORD_OPERATORS because the
+  // calculator's unlock mode treats them as actions (sign-flip / divide), not
+  // literal input — so a password containing them could never be re-typed.
+  it('rejects ± as a qualifying operator', () => {
+    expect(getPasswordStrength('12345±')).toMatchObject({ hasOperator: false, ok: false });
+  });
+
+  it('rejects % as a qualifying operator', () => {
+    expect(getPasswordStrength('12345%')).toMatchObject({ hasOperator: false, ok: false });
   });
 });
 

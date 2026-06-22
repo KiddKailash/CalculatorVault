@@ -60,6 +60,9 @@ export default class VaultStorage {
   private readonly storage: AsyncStorageLike;
   private readonly fs: FileSystemPort;
   private readonly decryptedFiles: Set<string> = new Set();
+  // Serializes read-modify-write of the encrypted index so concurrent
+  // add/remove calls don't drop entries.
+  private indexLock: Promise<unknown> = Promise.resolve();
 
   constructor(
     session: SecureSession,
@@ -69,6 +72,12 @@ export default class VaultStorage {
     this.session = session;
     this.storage = storage;
     this.fs = fs;
+  }
+
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.indexLock.then(fn, fn);
+    this.indexLock = next.catch(() => undefined);
+    return next;
   }
 
   initializeVault(): void {
@@ -85,7 +94,8 @@ export default class VaultStorage {
     const plaintext = decryptBytes(keys, base64ToBytes(ciphertextB64));
     const json = bytesToUtf8(plaintext);
     const parsed = JSON.parse(json) as VaultPhoto[];
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return [...parsed].sort((a, b) => (b.dateAdded ?? 0) - (a.dateAdded ?? 0));
   }
 
   private async saveVaultPhotos(photos: VaultPhoto[]): Promise<void> {
@@ -94,60 +104,64 @@ export default class VaultStorage {
     await this.storage.setItem(VAULT_INDEX_KEY, bytesToBase64(ciphertext));
   }
 
-  async addPhotoToVault(
+  addPhotoToVault(
     sourceUri: string,
     opts: AddPhotoOptions = {},
   ): Promise<VaultPhoto | null> {
-    this.initializeVault();
-    const keys = this.session.getKeys();
+    return this.runExclusive(async () => {
+      this.initializeVault();
+      const keys = this.session.getKeys();
 
-    const source = this.fs.fileFromUri(sourceUri);
-    const plaintext = await source.bytes();
+      const source = this.fs.fileFromUri(sourceUri);
+      const plaintext = await source.bytes();
 
-    const mediaType = detectMediaType(sourceUri, opts.mediaType);
-    const id = generateOpaqueId();
-    const opaqueFilename = generateOpaqueId();
+      const mediaType = detectMediaType(sourceUri, opts.mediaType);
+      const id = generateOpaqueId();
+      const opaqueFilename = generateOpaqueId();
 
-    const ciphertext = encryptBytes(keys, plaintext);
+      const ciphertext = encryptBytes(keys, plaintext);
 
-    const vaultDir = this.fs.vaultDir();
-    const target = this.fs.file(vaultDir, opaqueFilename);
-    if (target.exists) throw new Error('Opaque filename collision');
-    target.create();
-    target.write(ciphertext);
+      const vaultDir = this.fs.vaultDir();
+      const target = this.fs.file(vaultDir, opaqueFilename);
+      if (target.exists) throw new Error('Opaque filename collision');
+      target.create();
+      target.write(ciphertext);
 
-    const photo: VaultPhoto = {
-      id,
-      uri: target.uri,
-      filename: opaqueFilename,
-      dateAdded: Date.now(),
-      mediaType,
-      width: opts.width,
-      height: opts.height,
-      duration: opts.duration,
-      originalAssetId: opts.originalAssetId,
-    };
+      const photo: VaultPhoto = {
+        id,
+        uri: target.uri,
+        filename: opaqueFilename,
+        dateAdded: Date.now(),
+        mediaType,
+        width: opts.width,
+        height: opts.height,
+        duration: opts.duration,
+        originalAssetId: opts.originalAssetId,
+      };
 
-    try {
-      const current = await this.getVaultPhotos();
-      await this.saveVaultPhotos([...current, photo]);
-    } catch (err) {
-      if (target.exists) target.delete();
-      throw err;
-    }
+      try {
+        const current = await this.getVaultPhotos();
+        await this.saveVaultPhotos([...current, photo]);
+      } catch (err) {
+        if (target.exists) target.delete();
+        throw err;
+      }
 
-    return photo;
+      return photo;
+    });
   }
 
-  async removePhotoFromVault(photoId: string): Promise<boolean> {
-    const photos = await this.getVaultPhotos();
-    const photo = photos.find((p) => p.id === photoId);
-    if (!photo) return false;
+  removePhotoFromVault(photoId: string): Promise<boolean> {
+    return this.runExclusive(async () => {
+      const photos = await this.getVaultPhotos();
+      const photo = photos.find((p) => p.id === photoId);
+      if (!photo) return false;
 
-    const file = this.fs.fileFromUri(photo.uri);
-    if (file.exists) file.delete();
-    await this.saveVaultPhotos(photos.filter((p) => p.id !== photoId));
-    return true;
+      const file = this.fs.fileFromUri(photo.uri);
+      if (file.exists) file.delete();
+      await this.saveVaultPhotos(photos.filter((p) => p.id !== photoId));
+      return true;
+    });
   }
 
   async clearVault(): Promise<void> {
@@ -182,6 +196,17 @@ export default class VaultStorage {
     cacheFile.write(plaintext);
     this.decryptedFiles.add(cacheFile.uri);
     return cacheFile.uri;
+  }
+
+  removeDecryptedFile(uri: string): void {
+    if (!this.decryptedFiles.has(uri)) return;
+    try {
+      const file = this.fs.fileFromUri(uri);
+      if (file.exists) file.delete();
+    } catch {
+      // best effort
+    }
+    this.decryptedFiles.delete(uri);
   }
 
   scrubDecryptedCache(): void {

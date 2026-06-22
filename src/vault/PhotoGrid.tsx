@@ -7,6 +7,7 @@ import type VaultStorage from './_VaultStorage';
 interface PhotoGridProps {
   storage: VaultStorage;
   photos: VaultPhoto[];
+  loaded?: boolean;
   onPhotoPress: (photo: VaultPhoto) => void;
   onPhotoLongPress: (photo: VaultPhoto) => void;
 }
@@ -17,20 +18,34 @@ const PHOTO_SIZE = (width - 60) / 3;
 const Thumbnail = ({ storage, photo }: { storage: VaultStorage; photo: VaultPhoto }) => {
   const [uri, setUri] = useState<string | null>(null);
 
+  // Key the effect on photo.id rather than the photo object so loadPhotos()
+  // (which produces a new array of new object refs) doesn't trigger another
+  // round of decryption + cache-file allocation for unchanged thumbnails.
   useEffect(() => {
     let cancelled = false;
+    let producedUri: string | null = null;
     (async () => {
       try {
         const decryptedUri = await storage.decryptToCache(photo);
-        if (!cancelled) setUri(decryptedUri);
+        if (cancelled) {
+          storage.removeDecryptedFile(decryptedUri);
+          return;
+        }
+        producedUri = decryptedUri;
+        setUri(decryptedUri);
       } catch {
         if (!cancelled) setUri(null);
       }
     })();
     return () => {
       cancelled = true;
+      if (producedUri) storage.removeDecryptedFile(producedUri);
     };
-  }, [storage, photo]);
+    // photo.uri/filename are derived from photo.id (each id maps 1:1 to a stored
+    // file), so id is a sufficient cache key. Using the whole `photo` object as
+    // a dep would re-trigger decryption on every loadPhotos() rerender.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storage, photo.id]);
 
   if (!uri) return <View style={[styles.photo, styles.placeholder]} />;
   return (
@@ -44,7 +59,7 @@ const Thumbnail = ({ storage, photo }: { storage: VaultStorage; photo: VaultPhot
   );
 };
 
-export default function PhotoGrid({ storage, photos, onPhotoPress, onPhotoLongPress }: PhotoGridProps) {
+export default function PhotoGrid({ storage, photos, loaded = true, onPhotoPress, onPhotoLongPress }: PhotoGridProps) {
   const renderPhoto = ({ item }: { item: VaultPhoto }) => {
     const isVideo = item.mediaType === 'video';
     return (
@@ -69,6 +84,7 @@ export default function PhotoGrid({ storage, photos, onPhotoPress, onPhotoLongPr
   };
 
   if (photos.length === 0) {
+    if (!loaded) return <View style={styles.emptyContainer} />;
     return (
       <View style={styles.emptyContainer}>
         <Text style={styles.emptyText}>No media in vault</Text>

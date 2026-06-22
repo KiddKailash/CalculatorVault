@@ -30,6 +30,7 @@ const useDecryptedUri = (storage: VaultStorage, photo: VaultPhoto | undefined): 
   const [uri, setUri] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
+    let producedUri: string | null = null;
     if (!photo) {
       setUri(null);
       return;
@@ -37,14 +38,25 @@ const useDecryptedUri = (storage: VaultStorage, photo: VaultPhoto | undefined): 
     (async () => {
       try {
         const next = await storage.decryptToCache(photo);
-        if (!cancelled) setUri(next);
+        if (cancelled) {
+          storage.removeDecryptedFile(next);
+          return;
+        }
+        producedUri = next;
+        setUri(next);
       } catch {
         if (!cancelled) setUri(null);
       }
     })();
     return () => {
       cancelled = true;
+      // Free the previous photo's decrypted file so swiping through a vault
+      // doesn't accumulate plaintext copies until close.
+      if (producedUri) storage.removeDecryptedFile(producedUri);
     };
+    // photo.id uniquely keys the underlying encrypted file; using the whole
+    // photo object would re-trigger decryption on unrelated rerenders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storage, photo?.id]);
   return uri;
 };

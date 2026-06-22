@@ -24,7 +24,10 @@ export const MAX_FAILURES_BEFORE_BACKOFF = 5;
 export const BACKOFF_BASE_MS = 30_000;
 export const BACKOFF_MAX_MS = 60 * 60 * 1000;
 export const MIN_PASSWORD_TOKENS = 6;
-export const PASSWORD_OPERATORS = ['+', '-', '×', '÷', '%', '±'] as const;
+// Excludes ± and % deliberately: in unlock mode the calculator treats those as
+// actions (sign-flip / divide-by-100) rather than literal input, so a password
+// containing them could never be re-entered.
+export const PASSWORD_OPERATORS = ['+', '-', '×', '÷'] as const;
 
 export class PasswordTooWeakError extends Error {
   constructor(message = 'Password must include at least 6 inputs and one operator') {

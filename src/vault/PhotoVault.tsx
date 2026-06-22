@@ -3,6 +3,7 @@ import * as MediaLibrary from "expo-media-library";
 import React, { useEffect, useState } from "react";
 import {
   Alert,
+  Linking,
   StatusBar,
   StyleSheet,
   Text,
@@ -20,44 +21,94 @@ import PhotoViewer from "./PhotoViewer";
 interface Props {
   storage: VaultStorage;
   onBack: () => void;
+  suppressLockRef?: React.MutableRefObject<boolean>;
 }
 
-export default function PhotoVault({ storage, onBack }: Props) {
+const promptOpenSettings = (purpose: string) => {
+  Alert.alert(
+    "Permission Needed",
+    `${purpose} permission was denied. Open Settings to grant access.`,
+    [
+      { text: "Cancel", style: "cancel" },
+      { text: "Open Settings", onPress: () => Linking.openSettings() },
+    ],
+  );
+};
+
+export default function PhotoVault({ storage, onBack, suppressLockRef }: Props) {
   const [photos, setPhotos] = useState<VaultPhoto[]>([]);
+  const [photosLoaded, setPhotosLoaded] = useState(false);
   const [viewMode, setViewMode] = useState<VaultViewMode>("grid");
   const [selectedPhoto, setSelectedPhoto] = useState<VaultPhoto | null>(null);
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showAddMediaSheet, setShowAddMediaSheet] = useState(false);
 
+  const withSuppressedLock = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    if (suppressLockRef) suppressLockRef.current = true;
+    try {
+      return await fn();
+    } finally {
+      // Defer release so an AppState event queued during the system flow
+      // (Android picker activity returns -> background change) doesn't slip
+      // through after we clear the flag.
+      setTimeout(() => {
+        if (suppressLockRef) suppressLockRef.current = false;
+      }, 500);
+    }
+  };
+
   useEffect(() => {
     loadPhotos();
   }, []);
+
+  const wipeVault = async () => {
+    try {
+      await storage.clearVault();
+    } catch {
+      // best effort — even on failure we want to return the user to a clean slate
+    }
+    setPhotos([]);
+    setPhotosLoaded(true);
+    onBack();
+  };
+
+  const promptCorruptedRecovery = () => {
+    Alert.alert(
+      "Vault Unreadable",
+      "The vault index could not be decrypted. This usually means the file is corrupted. You can reset the vault to start fresh — all encrypted media will be deleted.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Reset Vault", style: "destructive", onPress: wipeVault },
+      ],
+    );
+  };
 
   const loadPhotos = async () => {
     try {
       const vaultPhotos = await storage.getVaultPhotos();
       setPhotos(vaultPhotos);
+      setPhotosLoaded(true);
     } catch {
-      Alert.alert("Vault Error", "Could not read vault index. The vault may be corrupted.");
       setPhotos([]);
+      setPhotosLoaded(true);
+      promptCorruptedRecovery();
     }
   };
 
-  const requestMediaPermission = async (): Promise<{ camera: boolean; library: boolean; media: boolean }> => {
-    const camera = (await ImagePicker.requestCameraPermissionsAsync()).status === "granted";
-    const library = (await ImagePicker.requestMediaLibraryPermissionsAsync()).status === "granted";
-    const media = (await MediaLibrary.requestPermissionsAsync(true)).status === "granted";
-    return { camera, library, media };
+  const requestCameraPermission = async (): Promise<boolean> => {
+    const result = await ImagePicker.requestCameraPermissionsAsync();
+    return result.status === "granted";
   };
 
-  const showImagePickerOptions = async () => {
-    const perms = await requestMediaPermission();
-    if (!perms.camera && !perms.library) {
-      Alert.alert("Permissions Required", "Camera and Photos permissions are required to add to the vault.", [{ text: "OK" }]);
-      return;
-    }
-    setShowAddMediaSheet(true);
+  const requestLibraryPermission = async (): Promise<boolean> => {
+    const result = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    return result.status === "granted";
+  };
+
+  const requestMediaWritePermission = async (): Promise<boolean> => {
+    const result = await MediaLibrary.requestPermissionsAsync(true);
+    return result.status === "granted";
   };
 
   const importAsset = async (asset: ImagePicker.ImagePickerAsset, options: { deleteOriginal: boolean }) => {
@@ -82,18 +133,27 @@ export default function PhotoVault({ storage, onBack }: Props) {
       }
       await loadPhotos();
     } catch {
-      Alert.alert("Error", "Failed to import to vault");
+      // Most likely the vault index is corrupted — offer recovery rather than
+      // a dead-end "Failed to import" message.
+      promptCorruptedRecovery();
     }
   };
 
   const takePhoto = async () => {
+    const granted = await withSuppressedLock(requestCameraPermission);
+    if (!granted) {
+      promptOpenSettings("Camera");
+      return;
+    }
     try {
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ["images", "videos"],
-        allowsEditing: false,
-        quality: 0.8,
-        videoMaxDuration: 60,
-      });
+      const result = await withSuppressedLock(() =>
+        ImagePicker.launchCameraAsync({
+          mediaTypes: ["images", "videos"],
+          allowsEditing: false,
+          quality: 0.8,
+          videoMaxDuration: 60,
+        }),
+      );
       if (!result.canceled && result.assets[0]) {
         await importAsset(result.assets[0], { deleteOriginal: false });
       }
@@ -102,25 +162,53 @@ export default function PhotoVault({ storage, onBack }: Props) {
     }
   };
 
+  const promptImportFromLibrary = (asset: ImagePicker.ImagePickerAsset) => {
+    Alert.alert(
+      "Remove from Photos?",
+      "Delete the original from your photo library after vaulting? The vault copy is encrypted.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Keep original", onPress: () => importAsset(asset, { deleteOriginal: false }) },
+        {
+          text: "Delete original",
+          style: "destructive",
+          onPress: async () => {
+            // Defer the write-permission prompt until the user actually opts in
+            // to delete, so a normal "Keep" flow never triggers a second prompt.
+            const canWrite = await withSuppressedLock(requestMediaWritePermission);
+            if (!canWrite) {
+              Alert.alert(
+                "Cannot Delete Original",
+                "Photos write permission was denied. The asset has been vaulted; the original is still in Photos.",
+                [{ text: "OK", onPress: () => importAsset(asset, { deleteOriginal: false }) }],
+              );
+              return;
+            }
+            await importAsset(asset, { deleteOriginal: true });
+          },
+        },
+      ],
+    );
+  };
+
   const pickFromLibrary = async () => {
+    const granted = await withSuppressedLock(requestLibraryPermission);
+    if (!granted) {
+      promptOpenSettings("Photos");
+      return;
+    }
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images", "videos"],
-        allowsEditing: false,
-        quality: 0.8,
-        videoMaxDuration: 60,
-        allowsMultipleSelection: false,
-      });
+      const result = await withSuppressedLock(() =>
+        ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ["images", "videos"],
+          allowsEditing: false,
+          quality: 0.8,
+          videoMaxDuration: 60,
+          allowsMultipleSelection: false,
+        }),
+      );
       if (!result.canceled && result.assets[0]) {
-        const asset = result.assets[0];
-        Alert.alert(
-          "Remove from Photos?",
-          "Delete the original from your photo library after vaulting? The vault copy is encrypted.",
-          [
-            { text: "Keep original", onPress: () => importAsset(asset, { deleteOriginal: false }) },
-            { text: "Delete original", style: "destructive", onPress: () => importAsset(asset, { deleteOriginal: true }) },
-          ],
-        );
+        promptImportFromLibrary(result.assets[0]);
       }
     } catch {
       Alert.alert("Error", "Failed to pick media");
@@ -185,7 +273,7 @@ export default function PhotoVault({ storage, onBack }: Props) {
         <TouchableOpacity onPress={onBack} style={styles.backButton}>
           <Text style={styles.backButtonText}>←</Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={showImagePickerOptions} style={styles.addButton}>
+        <TouchableOpacity onPress={() => setShowAddMediaSheet(true)} style={styles.addButton}>
           <Text style={styles.addButtonText}>+</Text>
         </TouchableOpacity>
       </View>
@@ -193,6 +281,7 @@ export default function PhotoVault({ storage, onBack }: Props) {
         <PhotoGrid
           storage={storage}
           photos={photos}
+          loaded={photosLoaded}
           onPhotoPress={handlePhotoPress}
           onPhotoLongPress={handlePhotoLongPress}
         />
